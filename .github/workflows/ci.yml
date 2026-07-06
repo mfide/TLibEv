@@ -1,0 +1,144 @@
+name: CI
+
+# Delphi has no free hosted runner, so CI validates the Free Pascal
+# ({$MODE DELPHI}) build path, which shares the exact same LibEv.pas source.
+# Every demo is compiled and then run; each demo self-checks and returns a
+# non-zero exit code on failure, so a green job means the behaviour is correct
+# on that platform, not merely that it compiled.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fpc:
+    name: FPC / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux: epoll backend. Runs every demo except the winsock-only
+          # IoDemo. UartLoopbackDemo runs here because it builds a virtual
+          # serial pair with a PTY - no hardware needed.
+          - os: ubuntu-latest
+            demos: TimerDemo AsyncDemo StatDemo EchoDemo SignalDemo SignalSelfDemo SignalFdDemo ForkDemo LoopHooksDemo TimeoutDemo PriorityDemo ExtrasDemo HooksDemo PollDemo UartLoopbackDemo
+            build_only: KeyDemo
+          # Linux on ARM64 (aarch64) - a free GitHub hosted runner. This is
+          # what proves the FPC build is architecture-independent: LibEv.pas
+          # takes all its platform structs/syscalls from the RTL, which lays
+          # them out per architecture. Same demo set as x86-64 Linux.
+          - os: ubuntu-24.04-arm
+            demos: TimerDemo AsyncDemo StatDemo EchoDemo SignalDemo SignalSelfDemo SignalFdDemo ForkDemo LoopHooksDemo TimeoutDemo PriorityDemo ExtrasDemo HooksDemo PollDemo UartLoopbackDemo
+            build_only: KeyDemo
+          # Windows: select backend. Signal/child/fork watchers are Linux-only.
+          # KeyDemo is interactive and UartLoopbackDemo needs a real COM port
+          # with a physical RX<->TX loopback, so both are compile-only here.
+          - os: windows-latest
+            demos: TimerDemo AsyncDemo StatDemo EchoDemo IoDemo SignalSelfDemo LoopHooksDemo TimeoutDemo PriorityDemo ExtrasDemo HooksDemo
+            build_only: KeyDemo UartLoopbackDemo
+          # macOS (Apple Silicon) - poll backend. epoll/eventfd/signalfd/
+          # timerfd/inotify and child watchers are Linux-only, so the demos
+          # that rely on them (SignalDemo, SignalFdDemo, PollDemo, ForkDemo)
+          # are not built here; signals use sigaction as on Linux.
+          - os: macos-latest
+            demos: TimerDemo AsyncDemo StatDemo EchoDemo SignalSelfDemo LoopHooksDemo TimeoutDemo PriorityDemo ExtrasDemo HooksDemo
+            build_only: KeyDemo
+    env:
+      DEMOS: ${{ matrix.demos }}
+      BUILD_ONLY: ${{ matrix.build_only }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Install FPC per runner: setup-lazarus on Windows and x86 Linux, apt on
+      # ARM64 Linux (setup-lazarus has no ARM64 binaries), Homebrew on macOS.
+      - name: Install Free Pascal (setup-lazarus)
+        if: ${{ runner.os == 'Windows' || (runner.os == 'Linux' && !endsWith(matrix.os, '-arm')) }}
+        uses: gcarreno/setup-lazarus@v3
+        with:
+          lazarus-version: stable
+
+      - name: Install Free Pascal (Linux ARM64)
+        if: ${{ endsWith(matrix.os, '-arm') }}
+        run: sudo apt-get update && sudo apt-get install -y fpc
+
+      - name: Install Free Pascal (macOS)
+        if: ${{ runner.os == 'macOS' }}
+        run: brew install fpc
+
+      - name: Show compiler version
+        run: fpc -iV
+
+      - name: Build and run demos
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          # Run a command, capturing output; on failure surface it both to the
+          # log and as a GitHub annotation (readable via the public check-runs
+          # API even without authentication).
+          run_capture() {
+            local label="$1"; shift
+            local out rc
+            out=$("$@" 2>&1); rc=$?
+            printf '%s\n' "$out"
+            if [ $rc -ne 0 ]; then
+              local enc="${out//'%'/%25}"
+              enc="${enc//$'\r'/}"
+              enc="${enc//$'\n'/%0A}"
+              echo "::error title=${label}::${enc}"
+              return 1
+            fi
+          }
+
+          mkdir -p build
+          cd examples
+          for d in $DEMOS $BUILD_ONLY; do
+            echo "::group::compile $d"
+            run_capture "compile $d" fpc -Mdelphi -Sh -FE../build -Fu../src "$d.dpr" || exit 1
+            echo "::endgroup::"
+          done
+
+          # Only the non-interactive, self-testing demos are executed.
+          cd ../build
+          for d in $DEMOS; do
+            echo "::group::run $d"
+            run_capture "run $d" "./$d" || exit 1
+            echo "::endgroup::"
+          done
+
+  # 32-bit ARM (armhf / armv7) has no hosted runner, so build and run it under
+  # QEMU user-mode emulation in a Debian armhf container. Slow, but it proves
+  # the RTL-sourced platform layer is correct on a 32-bit architecture too
+  # (different pointer/long width). The native jobs above are the fast path.
+  fpc-arm32:
+    name: FPC / arm32 (qemu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - name: Build and run demos (armhf under QEMU)
+        run: |
+          docker run --rm --platform linux/arm/v7 -v "$PWD":/work -w /work \
+            arm32v7/debian:bookworm bash -c '
+              set -e
+              apt-get update -qq && apt-get install -y -qq fpc
+              echo "FPC version: $(fpc -iV)  arch: $(fpc -iTP)"
+              DEMOS="TimerDemo AsyncDemo StatDemo EchoDemo SignalDemo SignalSelfDemo SignalFdDemo ForkDemo LoopHooksDemo TimeoutDemo PriorityDemo ExtrasDemo HooksDemo PollDemo UartLoopbackDemo"
+              mkdir -p build && cd examples
+              for d in $DEMOS KeyDemo; do
+                echo "=== compile $d ==="
+                fpc -Mdelphi -Sh -FE../build -Fu../src "$d.dpr" >/dev/null
+              done
+              cd ../build
+              for d in $DEMOS; do
+                echo "=== run $d ==="
+                ./"$d"
+              done
+            '

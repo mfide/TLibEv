@@ -1,0 +1,8 @@
+# Normalise line endings: store LF in the repo, check out native.
+* text=auto
+
+# Pascal sources are text.
+*.pas text
+*.dpr text
+*.inc text
+*.md  text

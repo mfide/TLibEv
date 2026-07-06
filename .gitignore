@@ -1,0 +1,32 @@
+# Build output directories
+/bin/
+/bin32/
+/binlinux/
+/build/
+
+# Compiled units, objects and executables
+*.dcu
+*.ppu
+*.o
+*.a
+*.exe
+*.res
+*.or
+*.compiled
+
+# Delphi / Lazarus IDE and project state
+*.local
+*.identcache
+*.dsk
+*.tvsconfig
+*.lps
+__history/
+__recovery/
+*.~*
+
+# Upstream libev C source: kept locally as a reference for the
+# "ev.c:NNNN" comments, not redistributed here (see README).
+/libev-4.33/
+
+# Internal working notes, not part of the release.
+/ROADMAP.md
